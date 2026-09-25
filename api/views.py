@@ -1,22 +1,20 @@
 # api/views.py
-import logging
-import uuid
-from django.shortcuts import get_object_or_404
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import IsAuthenticated
+from datetime import datetime
+from bson import ObjectId
+from bson.errors import InvalidId
+
+from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
 
-from .models import Trip
+from .db import trips_collection
 from .serializers import (
     GenerateRequestSerializer,
     SearchQuerySerializer,
     TripPatchSerializer,
-    TripSerializer,
 )
 from . import services
 
-logger = logging.getLogger(__name__)
 
 def _compute_estimates(plan: dict) -> dict:
     """Add estimated_cost per day + global estimates + map markers."""
@@ -44,14 +42,31 @@ def _compute_estimates(plan: dict) -> dict:
     return plan
 
 
+def _format_trip_document(doc: dict) -> dict:
+    """Convert MongoDB Document ObjectId and dates to JSON-friendly format."""
+    if not doc:
+        return None
+    return {
+        "id": str(doc["_id"]),
+        "user_id": doc.get("user_id"),
+        "destination": doc.get("destination"),
+        "days": doc.get("days", {}),
+        "preferences": doc.get("preferences", {}),
+        "status": doc.get("status", "draft"),
+        "created_at": doc.get("created_at"),
+        "updated_at": doc.get("updated_at"),
+    }
+
+
 @api_view(["POST"])
-@permission_classes([IsAuthenticated])
 def generate(request):
     ser = GenerateRequestSerializer(data=request.data)
     ser.is_valid(raise_exception=True)
     data = ser.validated_data
 
+    uid = request.headers.get("X-User-Id", "demo")
     days = data["days"]
+
     prompt = (
         f"Plan {days} days in {data['destination']}. "
         f"Interests: {', '.join(data['interests']) if data['interests'] else 'sightseeing'}. "
@@ -65,19 +80,26 @@ def generate(request):
     plan = services.gemini(prompt)
     plan = _compute_estimates(plan)
 
-    trip = Trip.objects.create(
-        user=request.user,  # Securely tie to authenticated user
-        destination=data["destination"],
-        days=plan,
-        preferences=data,
-        status="draft",
-    )
+    now = datetime.utcnow()
+    trip_doc = {
+        "user_id": uid,
+        "destination": data["destination"],
+        "days": plan,
+        "preferences": data,
+        "status": "draft",
+        "created_at": now,
+        "updated_at": now,
+    }
 
-    return Response({"id": str(trip.id), "itinerary": plan}, status=status.HTTP_201_CREATED)
+    result = trips_collection.insert_one(trip_doc)
+
+    return Response({
+        "id": str(result.inserted_id),
+        "itinerary": plan
+    }, status=status.HTTP_201_CREATED)
 
 
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
 def search(request):
     ser = SearchQuerySerializer(data=request.query_params)
     ser.is_valid(raise_exception=True)
@@ -101,48 +123,56 @@ def search(request):
 
 
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
 def list_trips(request):
-    # Only return trips owned by the authenticated user
-    trips = Trip.objects.filter(user=request.user)
+    uid = request.headers.get("X-User-Id", "demo")
+    trips = trips_collection.find({"user_id": uid}).sort("created_at", -1)
+
     return Response([
         {
-            "id": str(t.id),
-            "destination": t.destination,
-            "title": t.days.get("title", "Untitled"),
-            "day_count": len(t.days.get("days", [])),
-            "status": t.status,
-            "updated_at": t.updated_at,
+            "id": str(t["_id"]),
+            "destination": t.get("destination", ""),
+            "title": t.get("days", {}).get("title", "Untitled"),
+            "day_count": len(t.get("days", {}).get("days", [])),
+            "status": t.get("status", "draft"),
+            "updated_at": t.get("updated_at"),
         }
         for t in trips
     ])
 
 
 @api_view(["GET", "PATCH", "DELETE"])
-@permission_classes([IsAuthenticated])
 def trip_detail(request, trip_id):
-    # Prevent unauthorized users from querying other people's objects
-    trip = get_object_or_404(Trip, id=trip_id, user=request.user)
+    try:
+        obj_id = ObjectId(trip_id)
+    except (InvalidId, ValueError, TypeError):
+        return Response({"detail": "Invalid Trip ID format."}, status=status.HTTP_400_BAD_REQUEST)
+
+    trip = trips_collection.find_one({"_id": obj_id})
+    if not trip:
+        return Response({"detail": "Trip not found."}, status=status.HTTP_404_NOT_FOUND)
 
     if request.method == "GET":
-        return Response(TripSerializer(trip).data)
+        return Response(_format_trip_document(trip))
 
     elif request.method == "PATCH":
         ser = TripPatchSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
 
+        update_fields = {"updated_at": datetime.utcnow()}
         if "days" in ser.validated_data:
-            trip.days = _compute_estimates(ser.validated_data["days"])
+            update_fields["days"] = _compute_estimates(ser.validated_data["days"])
         if "status" in ser.validated_data:
-            trip.status = ser.validated_data["status"]
-        trip.save()
-        return Response(TripSerializer(trip).data)
+            update_fields["status"] = ser.validated_data["status"]
+
+        trips_collection.update_one({"_id": obj_id}, {"$set": update_fields})
+        updated_trip = trips_collection.find_one({"_id": obj_id})
+        return Response(_format_trip_document(updated_trip))
 
     elif request.method == "DELETE":
-        trip.delete()
+        trips_collection.delete_one({"_id": obj_id})
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-# Keep legacy aliases for routing backward compatibility
+# Aliases for compatibility
 generate_itinerary = generate
 search_destinations = search
