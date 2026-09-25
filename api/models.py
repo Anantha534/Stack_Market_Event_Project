@@ -1,6 +1,7 @@
 # api/models.py
 from django.db import models
 from django.conf import settings
+from django.db import models
 
 class Trip(models.Model):
     # Link directly to standard auth User instead of an unverified string header
