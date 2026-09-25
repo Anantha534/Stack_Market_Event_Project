@@ -1,19 +1,19 @@
+# travel_planner/settings.py
+import os
 from pathlib import Path
 from dotenv import load_dotenv
-import os
 
-# Load environment variables
+# Load environmental configs from an untracked .env file
 load_dotenv()
 
-# Build paths
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# Core settings
-SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-hackathon-key')
-DEBUG = os.getenv('DEBUG', 'True') == 'True'
-ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', '*').split(',')
+SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-fallback-development-key-123')
 
-# Application definition
+DEBUG = os.environ.get('DEBUG', 'True') == 'True'
+
+ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', '*').split(',')
+
 INSTALLED_APPS = [
     'django.contrib.admin',
     'django.contrib.auth',
@@ -21,21 +21,26 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    
+    # Installed system backends
     'rest_framework',
+    'rest_framework.authtoken', # Enabled token generation backend
     'corsheaders',
-    'api',  # <-- Ensure 'api' is listed here
+    'api',
 ]
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
-    'corsheaders.middleware.CorsMiddleware',  # for CORS support
+    'corsheaders.middleware.CorsMiddleware',  # Handles CORS integration
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
+
+ROOT_URLCONF = 'travel_planner.urls'
 
 TEMPLATES = [
     {
@@ -53,10 +58,8 @@ TEMPLATES = [
     },
 ]
 
-ROOT_URLCONF = 'travel_planner.urls'
 WSGI_APPLICATION = 'travel_planner.wsgi.application'
 
-# Database - Using SQLite for auth/sessions only
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
@@ -64,21 +67,31 @@ DATABASES = {
     }
 }
 
-# REST Framework
+# REST Framework Configuration
 REST_FRAMEWORK = {
-    'DEFAULT_PERMISSION_CLASSES': [
-        'rest_framework.permissions.AllowAny',
+    'DEFAULT_AUTHENTICATION_CLASSES': [
+        'rest_framework.authentication.TokenAuthentication', # Principal auth standard
+        'rest_framework.authentication.SessionAuthentication', # Fallback interface helper
     ],
-    'DEFAULT_AUTHENTICATION_CLASSES': [],
+    'DEFAULT_PERMISSION_CLASSES': [
+        'rest_framework.permissions.IsAuthenticated', # Endpoints guarded by default
+    ]
 }
 
-# CORS settings for Flutter
-CORS_ALLOW_ALL_ORIGINS = True
-CORS_ALLOW_CREDENTIALS = True
+# CORS configuration
+CORS_ALLOW_ALL_ORIGINS = DEBUG  # Allow sandbox UI connections during development
 
-# MongoDB settings
-MONGODB_URI = os.getenv('MONGODB_URI')
-MONGODB_DBNAME = os.getenv('MONGODB_DBNAME', 'travel_planner')
+AUTH_PASSWORD_VALIDATORS = [
+    {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator'},
+]
 
-# Static files
+LANGUAGE_CODE = 'en-us'
+TIME_ZONE = 'UTC'
+USE_I18N = True
+USE_TZ = True
+
 STATIC_URL = 'static/'
+DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'

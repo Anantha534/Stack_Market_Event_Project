@@ -1,10 +1,11 @@
 # api/views.py
+import logging
 import uuid
-import requests
-
 from django.shortcuts import get_object_or_404
-from rest_framework.decorators import api_view
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from rest_framework import status
 
 from .models import Trip
 from .serializers import (
@@ -15,6 +16,7 @@ from .serializers import (
 )
 from . import services
 
+logger = logging.getLogger(__name__)
 
 def _compute_estimates(plan: dict) -> dict:
     """Add estimated_cost per day + global estimates + map markers."""
@@ -43,14 +45,13 @@ def _compute_estimates(plan: dict) -> dict:
 
 
 @api_view(["POST"])
+@permission_classes([IsAuthenticated])
 def generate(request):
     ser = GenerateRequestSerializer(data=request.data)
     ser.is_valid(raise_exception=True)
     data = ser.validated_data
 
-    uid = request.headers.get("X-User-Id", "demo")
     days = data["days"]
-
     prompt = (
         f"Plan {days} days in {data['destination']}. "
         f"Interests: {', '.join(data['interests']) if data['interests'] else 'sightseeing'}. "
@@ -65,17 +66,18 @@ def generate(request):
     plan = _compute_estimates(plan)
 
     trip = Trip.objects.create(
-        user_id=uid,
+        user=request.user,  # Securely tie to authenticated user
         destination=data["destination"],
         days=plan,
         preferences=data,
         status="draft",
     )
 
-    return Response({"id": str(trip.id), "itinerary": plan}, status=201)
+    return Response({"id": str(trip.id), "itinerary": plan}, status=status.HTTP_201_CREATED)
 
 
 @api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def search(request):
     ser = SearchQuerySerializer(data=request.query_params)
     ser.is_valid(raise_exception=True)
@@ -99,9 +101,10 @@ def search(request):
 
 
 @api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def list_trips(request):
-    uid = request.headers.get("X-User-Id", "demo")
-    trips = Trip.objects.filter(user_id=uid)
+    # Only return trips owned by the authenticated user
+    trips = Trip.objects.filter(user=request.user)
     return Response([
         {
             "id": str(t.id),
@@ -116,16 +119,15 @@ def list_trips(request):
 
 
 @api_view(["GET", "PATCH", "DELETE"])
+@permission_classes([IsAuthenticated])
 def trip_detail(request, trip_id):
-    try:
-        trip = Trip.objects.get(id=trip_id)
-    except (Trip.DoesNotExist, ValueError, Exception):
-        return Response({"detail": "Not found."}, status=404)
+    # Prevent unauthorized users from querying other people's objects
+    trip = get_object_or_404(Trip, id=trip_id, user=request.user)
 
     if request.method == "GET":
         return Response(TripSerializer(trip).data)
 
-    if request.method == "PATCH":
+    elif request.method == "PATCH":
         ser = TripPatchSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
 
@@ -136,11 +138,11 @@ def trip_detail(request, trip_id):
         trip.save()
         return Response(TripSerializer(trip).data)
 
-    if request.method == "DELETE":
+    elif request.method == "DELETE":
         trip.delete()
-        return Response(status=204)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-# Aliases in case any URLs import alternate names
+# Keep legacy aliases for routing backward compatibility
 generate_itinerary = generate
 search_destinations = search

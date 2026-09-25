@@ -1,142 +1,69 @@
+# api/services.py
 import os
-import re
 import json
+import re
 import requests
+import google.generativeai as genai
 from django.conf import settings
 
-# Gemini AI Service
-def generate_itinerary_plan(destination, days, budget, interests, travel_style="balanced", pace="moderate"):
-    """Generate travel itinerary using Gemini AI"""
-    import google.generativeai as genai
-    genai.configure(api_key=settings.GEMINI_API_KEY)
+# Initialize Gemini API
+genai.configure(api_key=os.environ.get("GEMINI_API_KEY", ""))
 
-    prompt = f"""
-    Create a {days}-day travel itinerary for {destination}.
-    Budget: {budget}
-    Interests: {', '.join(interests) if interests else 'general sightseeing'}
-    Travel style: {travel_style}
-    Pace: {pace}
+def geocode(query: str) -> dict:
+    """Geocode a query to lat/lng with a safe request timeout."""
+    try:
+        # Replace this with your actual geocoding service URL if custom
+        url = f"https://nominatim.openstreetmap.org/search?q={query}&format=json&limit=1"
+        headers = {"User-Agent": "TravelPlannerApp/1.0"}
+        response = requests.get(url, headers=headers, timeout=10)
+        
+        if response.status_code == 200 and response.json():
+            data = response.json()[0]
+            return {"lat": float(data["lat"]), "lng": float(data["lon"])}
+    except Exception:
+        pass
+    return {"lat": 0.0, "lng": 0.0}
 
-    Return STRICT JSON format only, no explanations:
-    {{
-        "destination": "{destination}",
-        "summary": "Brief overview of the trip",
-        "total_estimated_cost": "Estimated total cost range",
-        "days": [
-            {{
-                "day": 1,
-                "title": "Day title",
-                "activities": [
-                    {{
-                        "time": "HH:MM",
-                        "place": "Place name",
-                        "description": "Activity description",
-                        "duration_hours": 2,
-                        "cost_estimate": "$XX"
-                    }}
-                ]
-            }}
-        ],
-        "travel_tips": ["Tip 1", "Tip 2"],
-        "best_transport": "Recommended transport mode"
-    }}
-    Include 3-5 activities per day with real place names.
-    """
+def brave_search(query: str) -> list:
+    """Perform a web search using Brave Search API with request timeout."""
+    api_key = os.environ.get("BRAVE_SEARCH_API_KEY", "")
+    if not api_key:
+        return []
 
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    url = f"https://api.search.brave.com/res/v1/web/search?q={query}"
+    headers = {"Accept": "application/json", "X-Subscription-Token": api_key}
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            return response.json().get("web", {}).get("results", [])
+    except Exception:
+        pass
+    return []
+
+def gemini(prompt: str) -> dict:
+    """Generate itinerary JSON via Gemini and handle robust stripping of code markdown blocks."""
+    model = genai.GenerativeModel("gemini-pro")
+    
+    # Enable explicit structured JSON mode if supported by the SDK version, or rely on generation
     response = model.generate_content(prompt)
+    raw_text = response.text.strip()
 
-    # Extract JSON from response
-    text = response.text
-    json_match = re.search(r'```json\s*([\s\S]*?)\s*```', text)
-    if json_match:
-        text = json_match.group(1)
+    # Regex to clean out potential LLM markdown decorations (e.g. ```json ... ```)
+    if raw_text.startswith("```"):
+        raw_text = re.sub(r"^```(?:json)?\s*|```$", "", raw_text, flags=re.MULTILINE).strip()
 
     try:
-        return json.loads(text)
+        return json.loads(raw_text)
     except json.JSONDecodeError:
-        # Fallback if JSON parsing fails
+        # Clean fallback schema if JSON output parsing fails
         return {
-            "destination": destination,
-            "summary": f"Trip to {destination}",
-            "days": [],
-            "error": "Failed to parse AI response"
+            "title": "Failed to parse itinerary",
+            "days": [
+                {
+                    "day": 1,
+                    "summary": "Could not format response properly. Please try again.",
+                    "activities": []
+                }
+            ]
         }
-
-# Location Services
-def geocode_location(location):
-    """Get coordinates for a location using Nominatim"""
-    url = "https://nominatim.openstreetmap.org/search"
-    params = {
-        "q": location,
-        "format": "json",
-        "limit": 1
-    }
-    headers = {"User-Agent": "TravelPlannerHackathon/1.0"}
-
-    try:
-        response = requests.get(url, params=params, headers=headers, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        if data:
-            return {
-                "lat": float(data[0]["lat"]),
-                "lon": float(data[0]["lon"]),
-                "display_name": data[0]["display_name"]
-            }
-    except Exception as e:
-        print(f"Geocoding error: {e}")
-    return None
-
-def estimate_route(start, end):
-    """Estimate travel route between two points using OSRM"""
-    if not start or not end:
-        return None
-
-    url = f"https://router.project-osrm.org/route/v1/driving/{start['lon']},{start['lat']};{end['lon']},{end['lat']}"
-    try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        route = data["routes"][0]
-        return {
-            "distance_km": round(route["distance"] / 1000, 1),
-            "duration_min": round(route["duration"] / 60),
-            "cost_estimate_usd": round((route["distance"] / 1000) * 0.5, 2)  # Simple cost estimate
-        }
-    except Exception as e:
-        print(f"Route estimation error: {e}")
-        return None
-
-def get_map_url(lat, lon):
-    """Generate Google Maps URL for a location"""
-    return f"https://www.google.com/maps/search/?api=1&query={lat},{lon}"
-
-# Search Service
-def search_destinations(query):
-    """Search for destinations using Brave Search"""
-    if not settings.BRAVE_API_KEY:
-        return []
-
-    url = "https://api.search.brave.com/res/v1/web/search"
-    headers = {"X-Subscription-Token": settings.BRAVE_API_KEY}
-    params = {
-        "q": f"{query} travel destination guide",
-        "count": 5
-    }
-
-    try:
-        response = requests.get(url, headers=headers, params=params, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        return [
-            {
-                "title": result.get("title", ""),
-                "url": result.get("url", ""),
-                "description": result.get("description", "")
-            }
-            for result in data.get("web", {}).get("results", [])
-        ]
-    except Exception as e:
-        print(f"Search error: {e}")
-        return []
